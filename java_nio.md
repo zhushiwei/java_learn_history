@@ -307,6 +307,10 @@ private final class SubSelector {
         //统计有多少channel发生了触发事件
         private int processSelectedKeys(long var1) {
             byte var3 = 0;
+            //三个事件对应关系:
+            //Net.POLLIN -- OP_ACCEPT(16: ServerSocketChannel)\OP_READ(1: SocketChannel)
+            //Net.POLLOUT -- OP_WRITE(4: SocketChannel)
+            //NET.POLLCONN -- OP_CONNECT(8: SocketChannel)
             //读事件
             int var4 = var3 + this.processFDSet(var1, this.readFds, Net.POLLIN, false);
             //写事件
@@ -371,27 +375,82 @@ private final class SubSelector {
 
             return var6;
         }
-    }        
+    }
 ```
-
-
-
-
 
 查看下构造函数
 
 ```java
     WindowsSelectorImpl(SelectorProvider var1) throws IOException {
         super(var1);
-        //
+        //唤醒管道fd的读通道
         this.wakeupSourceFd = ((SelChImpl)this.wakeupPipe.source()).getFDVal();
         SinkChannelImpl var2 = (SinkChannelImpl)this.wakeupPipe.sink();
         var2.sc.socket().setTcpNoDelay(true);
+        //唤醒管道fd的写通道
         this.wakeupSinkFd = var2.getFDVal();
+        //将唤醒通道的fd写入pollWrapper的首位
         this.pollWrapper.addWakeupSocket(this.wakeupSourceFd, 0);
     }
 ```
 
+- selector上注册channel
+
+```java
+    protected void implRegister(SelectionKeyImpl var1) {
+        synchronized(this.closeLock) {
+            if (this.pollWrapper == null) {
+                throw new ClosedSelectorException();
+            } else {
+                this.growIfNeeded();
+                this.channelArray[this.totalChannels] = var1;
+                var1.setIndex(this.totalChannels);
+                this.fdMap.put(var1);
+                this.keys.add(var1);
+                this.pollWrapper.addEntry(this.totalChannels, var1);
+                ++this.totalChannels;
+            }
+        }
+    }
+
+   //判断polWrapper的长度是否需要增加，每次加倍
+    private void growIfNeeded() {
+        //totalChannels达到了数组channelArray的最大长度时需要加倍
+        if (this.channelArray.length == this.totalChannels) {
+            int var1 = this.totalChannels * 2;
+            SelectionKeyImpl[] var2 = new SelectionKeyImpl[var1];
+            //将channelArray拷贝到新的数组var2
+            System.arraycopy(this.channelArray, 1, var2, 1, this.totalChannels - 1);
+            this.channelArray = var2;
+            //将pollWrapper长度增加到var的长度
+            this.pollWrapper.grow(var1);
+        }
+
+        //如果totalChannels长度增加到1024时，需要新增thread
+        if (this.totalChannels % 1024 == 0) {
+            //在1024整数倍的位置上放入wakeupSourceFd,用于唤醒
+            this.pollWrapper.addWakeupSocket(this.wakeupSourceFd, this.totalChannels);
+            ++this.totalChannels;
+            ++this.threadsCount;
+        }
+
+    }
+
+    //将pollWrapper长度增加到var的长度
+    void grow(int var1) {
+        PollArrayWrapper var2 = new PollArrayWrapper(var1);
+
+        //将原先pollWrapper中的fd和eventOps，放入到新的pollArrayWrapper中var2
+        for(int var3 = 0; var3 < this.size; ++var3) {
+            this.replaceEntry(this, var3, var2, var3);
+        }
+        //原先的内存释放
+        this.pollArray.free();
+        this.pollArray = var2.pollArray;
+        this.size = var2.size;
+        this.pollArrayAddress = this.pollArray.address();
+    }
+```
 
 
 ## 总结
